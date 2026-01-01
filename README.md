@@ -1,24 +1,17 @@
-# Relatório de Teste de Intrusão (Pentest)
-
-**Tema:** Escalação de Privilégios em Container Linux (Red Hat UBI)
+# Relatório Técnico: Privilege Escalation em Container Linux (Red Hat UBI)
 
 **Autor:** Marcos Leal  
 **Data:** 01 de janeiro de 2026  
-**Tipo:** CTF / Laboratório Educacional
+**Tipo:** CTF / Laboratório Educacional / Red Hat Sandbox  
+**Classificação:** **CRÍTICA**
 
 ---
 
 ## 1. Sumário Executivo
 
-Durante a avaliação de segurança de um ambiente containerizado baseado em Red Hat Universal Base Image (RHEL UBI), foi identificada uma **falha crítica de configuração** relacionada à gestão de permissões de ficheiros e associação indevida de utilizadores ao grupo privilegiado **root (GID 0)**.
+Durante a análise de segurança de um ambiente containerizado baseado em **Red Hat Universal Base Image (RHEL UBI)**, foi identificada uma falha crítica de configuração (*misconfiguration*).
 
-Um utilizador não privilegiado conseguiu explorar permissões de escrita no ficheiro **/etc/passwd**, criando uma conta alternativa com **UID 0**, o que resultou na obtenção de **privilégios administrativos completos (root)** dentro do container.
-
-A vulnerabilidade permitiu o comprometimento total da integridade do sistema, apesar da presença de controlos compensatórios modernos, como restrições de *Linux Capabilities* e políticas *SELinux*.
-
-**Classificação:** Crítica  
-**Impacto:** Compromisso total do container  
-**Probabilidade:** Elevada
+Um utilizador comum, pertencente indevidamente ao grupo **root (GID 0)**, conseguiu explorar permissões de escrita excessivas no ficheiro **/etc/passwd**. Essa condição permitiu a criação de uma conta de superutilizador (*backdoor*), resultando na obtenção de **controlo total do sistema (privilégio máximo)**, contornando defesas modernas como **SELinux** e restrições de **Linux Capabilities**.
 
 ---
 
@@ -26,7 +19,7 @@ A vulnerabilidade permitiu o comprometimento total da integridade do sistema, ap
 
 ### 2.1 Fase 1 – Reconhecimento e Enumeração
 
-O acesso inicial foi obtido através de um *shell* restrito. A enumeração inicial teve como objetivo identificar o contexto de execução e as permissões do utilizador corrente.
+O acesso inicial foi obtido através de um *shell* restrito. A primeira etapa consistiu na identificação do contexto de execução e das permissões atribuídas ao utilizador corrente.
 
 **Comando executado:**
 
@@ -36,145 +29,102 @@ id
 
 **Resultado:**
 
-```bash
-uid=1005440000(user) gid=0(root) groups=0(root),1005440000(user)
-```
+![Resultado do comando id](user1.png)
 
 **Análise:**
-Embora o utilizador possua um UID elevado (não privilegiado), encontra-se associado ao grupo **root (GID 0)**. Esta configuração é relativamente comum em ambientes OpenShift, mas introduz riscos significativos quando combinada com permissões incorretas no sistema de ficheiros.
+O utilizador atual (`user`), apesar de possuir um UID elevado (não privilegiado), pertence ao grupo **GID 0 (root)**. Esta configuração é relativamente comum em ambientes OpenShift, porém representa um risco elevado quando combinada com permissões inadequadas em ficheiros sensíveis.
 
----
-
-### 2.2 Identificação da Vulnerabilidade
-
-**Comando executado:**
+**Verificação de ficheiros críticos:**
 
 ```bash
 ls -l /etc/passwd
 ```
 
-**Resultado:**
+**Vulnerabilidade identificada:**
+O ficheiro **/etc/passwd** apresenta permissões de escrita para o grupo (`rw-`). Como o utilizador pertence a esse grupo, torna-se possível modificar diretamente a base de dados de utilizadores do sistema.
 
-```bash
--rw-rw-r--. 1 root root 911 Dec 31 23:03 /etc/passwd
-```
-
-**Vulnerabilidade Identificada:**
-O ficheiro **/etc/passwd** possui permissões de escrita para o grupo (**rw-rw-r--**). Uma vez que o utilizador pertence ao grupo root, é possível modificar diretamente a base de dados de utilizadores do sistema.
+![Permissões inseguras em /etc/passwd](Recon.png)
 
 ---
 
-### 2.3 Fase 2 – Tentativas Iniciais de Exploração
+### 2.2 Fase 2 – Tentativas e Metodologia
 
-Foram inicialmente testadas abordagens alternativas:
+Inicialmente, foi testada a exploração via *User Namespaces*, com o objetivo de injetar código em scripts de inicialização (*entrypoint*). Embora a injeção tenha sido bem-sucedida, verificou-se que o container operava de forma **stateless**, revertendo todas as alterações após o reinício.
 
-* Exploração via *User Namespaces*;
-* Injeção de código em scripts de inicialização (*entrypoint*).
-
-**Resultado:**
-A injeção foi bem-sucedida, porém não persistente. O container apresentou comportamento **stateless**, e qualquer reinício resultou na perda das alterações efetuadas.
-
-**Lição Aprendida:**
-Em ambientes efémeros, a exploração deve ocorrer **em tempo de execução (runtime)**, sem dependência de persistência em disco ou reinicializações.
+**Decisão tática:**
+Abandonar abordagens dependentes de persistência em disco e concentrar a exploração em **tempo de execução (*runtime exploitation*)**.
 
 ---
 
-### 2.4 Fase 3 – Exploração Bem-Sucedida
+### 2.3 Fase 3 – Exploração Bem-Sucedida
 
-A exploração concentrou-se na modificação direta do ficheiro **/etc/passwd**.
+A exploração concentrou-se na modificação direta do ficheiro **/etc/passwd**, com o objetivo de criar um utilizador alternativo com privilégios administrativos.
 
-**Ação Executada:**
-Criação de um utilizador alternativo com **UID 0**, contornando o controlo de autenticação via **/etc/shadow**.
+**Ação executada:**
+Criação do utilizador `toor` com **UID 0** e campo de palavra-passe vazio.
 
 ```bash
 echo "toor::0:0:root:/root:/bin/bash" >> /etc/passwd
-```
-
-**Elevação de Privilégios:**
-
-```bash
 su toor
 ```
 
-*(Autenticação sem necessidade de palavra-passe)*
+**Resultado:**
+A elevação de privilégios ocorreu de forma imediata, sem necessidade de autenticação adicional.
 
-**Verificação:**
-
-```bash
-id
-```
-
-```bash
-uid=0(root) gid=0(root) groups=0(root)
-```
-
-**Estado:** Acesso root confirmado.
+![Exploração via utilizador toor](ataque_toor.png)
 
 ---
 
-### 2.5 Fase 4 – Pós-Exploração e Persistência
+### 2.4 Fase 4 – Persistência (Backdoor SUID)
 
-Para facilitar o acesso privilegiado sem depender de uma conta facilmente detetável, foi criado um binário com o bit **SUID**.
+Para garantir acesso privilegiado sem depender da conta `toor` (facilmente detetável), foi criado um binário **SUID** a partir do Bash.
 
-**Ação Executada:**
+**Comandos executados:**
 
 ```bash
 cp /bin/bash /projects/rootbash
 chmod +s /projects/rootbash
 ```
 
-**Resultado:**
-A execução de `/projects/rootbash -p` concede privilégios de root (**euid=0**) a qualquer utilizador.
+![Criação do binário SUID](backdoor.png)
+
+**Validação:**
+A execução do binário concede privilégios efetivos de root (**euid=0**).
+
+![Execução do backdoor SUID](backdorr-1.png)
 
 ---
 
-### 2.6 Fase 5 – Análise de Defesas Existentes
+### 2.5 Fase 5 – Análise de Defesas (Container Hardening)
 
-Mesmo com privilégios de UID 0, determinadas ações foram bloqueadas:
+Mesmo após a obtenção de acesso root, foram observadas camadas de defesa ativas no ambiente:
 
-* Leitura de `/etc/shadow`: *Permission denied*;
-* Execução de `chown`: *Operation not permitted*.
+* Leitura do ficheiro **/etc/shadow** bloqueada (*Permission denied*);
+* Alteração de donos de ficheiros (`chown`) impedida (*Operation not permitted*).
 
-**Conclusão Técnica:**
-O container encontra-se protegido por:
-
-* Remoção de *Linux Capabilities* sensíveis (ex.: `CAP_CHOWN`, `CAP_DAC_READ_SEARCH`);
-* Políticas restritivas de **SELinux**.
-
-Contudo, a possibilidade de escrita em **/etc/passwd** foi suficiente para comprometer o sistema, contornando eficazmente as proteções aplicadas ao **/etc/shadow**.
+**Conclusão técnica:**
+O container utiliza **Linux Capabilities** restritas (ausência de `CAP_CHOWN`) e, possivelmente, políticas **SELinux** ativas. Contudo, a permissão incorreta no **/etc/passwd** foi suficiente para comprometer a integridade do sistema, neutralizando essas defesas.
 
 ---
 
-## 3. Remediação e Mitigação
+## 3. Remediação (Mitigação)
 
-As seguintes medidas são recomendadas para eliminação da vulnerabilidade:
+Para corrigir a vulnerabilidade identificada e prevenir explorações semelhantes, recomenda-se:
 
-* Ajustar permissões do ficheiro **/etc/passwd** para `644`;
-* Remover utilizadores não administrativos do grupo **root (GID 0)**;
-* Aplicar sistemas de ficheiros **read-only** na raiz do container;
-* Reforçar políticas de *SecurityContext* e *Pod Security Standards*.
+* **Correção imediata de permissões (crítico):**
 
----
+```bash
+chmod 644 /etc/passwd
+```
 
-## 4. Âmbito do Teste
-
-O teste foi conduzido exclusivamente dentro do container atribuído no ambiente **Red Hat Developer Sandbox**. Não foram realizadas tentativas de *container escape* nem ações contra o *host* ou *node* subjacente.
-
-Todas as alterações efetuadas para prova de conceito foram removidas após a validação.
+* **Princípio do Menor Privilégio (PoLP):** Remoção de utilizadores não administrativos do grupo **root (GID 0)**;
+* **Imutabilidade:** Configuração do sistema de ficheiros raiz como **read-only** através de políticas de segurança do Kubernetes/OpenShift.
 
 ---
 
-## 5. Conclusão e Parecer Final
+## 4. Conclusão e Considerações Éticas
 
-Este teste de intrusão demonstrou que a segurança de containers depende fundamentalmente de **configurações rigorosas de permissões**, e não apenas da imagem base ou do kernel subjacente.
+Este teste de intrusão demonstrou que a segurança em containers depende diretamente de uma aplicação rigorosa do conceito de **Defesa em Profundidade**. A falha de uma única camada — neste caso, permissões de ficheiros — foi suficiente para comprometer todo o ambiente.
 
-A vulnerabilidade explorada — **Escalação de Privilégios por Misconfiguration** — foi classificada como **CRÍTICA**, pois permitiu o controlo total do container através de um vetor de ataque simples e altamente eficaz.
-
-Apesar da presença de mecanismos modernos de defesa (*SELinux* e *Linux Capabilities*), uma única falha de permissões foi suficiente para comprometer toda a superfície de segurança.
-
-Este cenário reforça o princípio de **Defesa em Profundidade (Defense in Depth)**: a ausência ou falha de uma camada não deve resultar no colapso completo do sistema.
-
----
-
-**Parecer Final:**
-A imagem e o ambiente analisados requerem correções imediatas de configuração para mitigar riscos críticos de escalonamento de privilégios em ambientes containerizados.
+**Nota ética:**
+O teste foi realizado exclusivamente em ambiente isolado (*Red Hat Sandbox*). Após a validação da prova de conceito, todas as alterações introduzidas (utilizadores e binários) foram removidas, restaurando o sistema ao seu estado original.
