@@ -1,87 +1,111 @@
 Relatório de Pentest: Privilege Escalation em Container Linux (Red Hat UBI)
 
-Autor: Marcos Leal Data: 01 de Janeiro de 2026 Tipo: CTF / Laboratório Educacional / Red Hat Sandbox
+Autor: marcos leal Data: 01 de Janeiro de 2026 Tipo: CTF / Laboratório Educacional
 1. Sumário Executivo
 
-Durante a análise de segurança de um ambiente containerizado, foi identificada uma falha crítica de configuração nas permissões de ficheiros do sistema e na gestão de grupos de utilizadores.
-
-Um utilizador comum, pertencente indevidamente ao grupo root (GID 0), conseguiu explorar permissões de escrita no ficheiro /etc/passwd para criar uma conta de superutilizador (backdoor), obtendo controlo total do sistema (Privilégio Máximo). A vulnerabilidade permitiu contornar controlos de segurança adicionais, como SELinux e Linux Capabilities restritas.
+Durante a análise de segurança de um ambiente containerizado, foi identificada uma falha crítica de configuração nas permissões de ficheiros do sistema e na gestão de grupos de utilizadores. Um utilizador comum, pertencente indevidamente ao grupo root (GID 0), conseguiu explorar permissões de escrita no ficheiro /etc/passwd para criar uma conta de superutilizador (backdoor), obtendo controlo total do sistema (Privilégio Máximo).
 2. Análise Técnica (Passo a Passo)
 Fase 1: Reconhecimento e Enumeração (Reconnaissance)
 
 O acesso inicial foi obtido através de um shell restrito. A primeira etapa consistiu em identificar o ambiente e as permissões do utilizador atual.
 
-O comando id revelou uma configuração perigosa:
+Comando: id Resultado:
+Bash
 
-    [FOTO AQUI: Screenshot do comando id mostrando "gid=0(root)" e "groups=0(root)"]
+uid=1005440000(user) gid=0(root) groups=0(root),1005440000(user)
 
-Análise: O utilizador atual (user), apesar de ter um UID alto (não privilegiado), pertence ao grupo GID 0 (root). Esta é uma configuração comum em ambientes OpenShift/Kubernetes para facilitar permissões de ficheiros, mas apresenta riscos elevados se não for devidamente isolada.
+Análise: O utilizador atual (user), apesar de ter um UID alto (não privilegiado), pertence ao grupo GID 0 (root). Esta é uma configuração comum em ambientes OpenShift, mas apresenta riscos elevados.
 
-De seguida, verificaram-se as permissões de ficheiros críticos. O comando ls -l /etc/passwd revelou a vulnerabilidade chave:
+Comando: ls -l /etc/passwd Resultado:
+Bash
 
-    [FOTO AQUI: Screenshot do comando ls -l /etc/passwd destacando as permissões -rw-rw-r--]
+-rw-rw-r--. 1 root root 911 Dec 31 23:03 /etc/passwd
 
-Vulnerabilidade Identificada: O ficheiro /etc/passwd tem permissões de escrita para o grupo (rw-). Como o nosso utilizador pertence a esse grupo (GID 0), temos permissão legítima para alterar a lista de utilizadores do sistema.
+Vulnerabilidade Identificada: O ficheiro /etc/passwd tem permissões de escrita para o grupo (rw-). Como o nosso utilizador pertence a esse grupo, temos permissão para alterar a lista de utilizadores do sistema.
 Fase 2: Tentativas de Exploração (Falha e Adaptação)
 
 Inicialmente, tentou-se uma abordagem via User Namespaces e injeção em scripts de inicialização (entrypoint.sh).
 
-    Ação: Criação de um script Python para mapear o utilizador para nobody e modificar o script de arranque.
+    Ação: Criação de um script Python para mapear o utilizador para nobody e modificar o /checode/entrypoint-volume.sh.
 
-    Resultado: Sucesso na injeção, mas falha na persistência. O container era "stateless" (sem estado), e ao forçar o reinício, as alterações no disco foram perdidas.
+    Resultado: Sucesso na injeção, mas falha na persistência. O container era "stateless" (sem estado), e ao forçar o reinício (kill 1), as alterações no disco foram perdidas.
 
     Lição Aprendida: Em ambientes efémeros, a exploração deve ser imediata (runtime) e não depender de reinicializações.
 
 Fase 3: Exploração Bem-Sucedida (Exploitation)
 
-Mudou-se o foco para a exploração direta da vulnerabilidade de permissão no /etc/passwd em tempo real.
+Mudou-se o foco para a vulnerabilidade de permissão no /etc/passwd.
 
-Ação: Injeção de um utilizador "root" alternativo. Criámos um utilizador chamado toor com UID 0 (o mesmo ID do root) e definimos o campo de senha como vazio (::). Esta técnica contorna a necessidade de crackear hashes complexos no /etc/shadow, pois o sistema assume que este utilizador não requer senha.
+Ação: Injeção de um utilizador "root" alternativo. Criámos um utilizador chamado toor com UID 0 (mesmo ID do root) e campo de senha vazio (::), contornando a necessidade de crackear hashes no /etc/shadow.
 
-A imagem abaixo demonstra a injeção do utilizador e a mudança imediata para a conta de superutilizador:
+Comando Executado:
+Bash
 
-    [FOTO AQUI: Screenshot mostrando os comandos: echo "toor::0..." >> /etc/passwd, seguido de su toor e o id final mostrando uid=0(root)]
+echo "toor::0:0:root:/root:/bin/bash" >> /etc/passwd
 
-Estado: Acesso Root confirmado. O prompt mudou de $ para #.
+Elevação de Privilégio:
+Bash
+
+su toor
+# (Sem password necessária)
+
+Verificação:
+Bash
+
+id
+# uid=0(root) gid=0(root) groups=0(root)
+
+Estado: Acesso Root confirmado.
 Fase 4: Pós-Exploração e Persistência
 
-Para garantir o acesso futuro sem depender do utilizador toor (que é facilmente detetável numa auditoria), foi criado um binário SUID (Set User ID) como backdoor.
+Para garantir o acesso futuro sem depender do utilizador toor (que é fácil de detetar), foi criado um binário SUID.
 
-Ação: Cópia do binário do Bash e ativação do bit SUID.
+Ação: Cópia do Bash com bit SUID ativado.
+Bash
 
-    [FOTO AQUI: Screenshot dos comandos cp /bin/bash ... e chmod +s ..., seguido de um ls -l mostrando o ficheiro com a permissão rwsr-xr-x (geralmente destacado a vermelho)]
+cp /bin/bash /projects/rootbash
+chmod +s /projects/rootbash
 
-Resultado: Qualquer execução futura deste binário com a flag -p concede privilégios de root (euid=0), mesmo que o atacante tenha regressado ao utilizador comum, garantindo persistência no ambiente.
+Resultado: Qualquer execução futura de /projects/rootbash -p concede privilégios de root (euid=0), mesmo regressando ao utilizador comum.
 Fase 5: Análise de Defesas (Container Hardening)
 
-Durante a pós-exploração, verificou-se que o ambiente possuía camadas de defesa adicionais (Defense in Depth). Mesmo com UID 0, algumas ações de sistema foram bloqueadas:
+Mesmo com UID 0, algumas ações foram bloqueadas:
 
-    Leitura de /etc/shadow: Retornou Permission denied.
+    Leitura de /etc/shadow: Permission denied.
 
-    Comando chown (mudar dono de ficheiro): Retornou Operation not permitted.
+    Comando chown: Operation not permitted.
 
-    [FOTO AQUI: Screenshot tentando ler o /etc/shadow e falhando, comprovando as restrições do container]
-
-Conclusão da Análise: O container está protegido por Linux Capabilities restritas (o runtime removeu capacidades como CAP_CHOWN e CAP_DAC_READ_SEARCH) e provavelmente um perfil SELinux restritivo. No entanto, a capacidade de escrever no /etc/passwd foi um vetor de ataque suficiente para comprometer a integridade do sistema, contornando a proteção do /etc/shadow.
+Conclusão: O container está protegido por Linux Capabilities restritas (falta de CAP_CHOWN, CAP_DAC_READ_SEARCH) e possivelmente SELinux. No entanto, a capacidade de escrever no /etc/passwd foi suficiente para comprometer a integridade do sistema, contornando a proteção do /etc/shadow.
 3. Remediação (Mitigação)
 
 Para corrigir esta falha, recomenda-se:
 
-    Remediação Imediata: Remover a permissão de escrita do grupo no ficheiro de configuração crítica:
-    Bash
+    Remover a permissão de escrita do grupo no /etc/passwd: chmod 644 /etc/passwd.
+    Remover utilizadores não-administrativos do grupo root (GID 0).
 
-    chmod 644 /etc/passwd
+Utilizar sistemas de ficheiros "Read-Only" para a raiz do container
 
-    Princípio do Menor Privilégio (PoLP): Remover utilizadores não-administrativos do grupo root (GID 0). O acesso a ficheiros partilhados deve ser gerido por grupos específicos, não pelo GID 0.
+Âmbito do Teste: O teste foi realizado estritamente dentro dos limites do container atribuído no ambiente Red Hat Developer Sandbox. O objetivo foi identificar falhas de configuração na imagem base do sistema operativo (RHEL UBI).
 
-    Hardening de Container: Implementar políticas de segurança (SecurityContext em Kubernetes/OpenShift) para impor sistemas de ficheiros raiz como "Read-Only", impedindo qualquer modificação em ficheiros de sistema.
+Declaração Ética: Nenhuma técnica de "Container Escape" foi utilizada para comprometer a infraestrutura subjacente (Host/Node). Todas as alterações de persistência (backdoors) foram removidas após a validação da prova de conceito, restaurando o estado original do sistema
 
-4. Conclusão e Parecer Final
+Conclusão e Parecer Final
 
-O presente teste de intrusão evidenciou que a segurança de contentores não depende exclusivamente da imagem base ou do kernel, mas sim de uma configuração rigorosa de permissões locais.
+O presente teste de intrusão, realizado em ambiente controlado (Sandbox), evidenciou que a segurança de contentores não depende exclusivamente da imagem base ou do kernel, mas sim de uma configuração rigorosa de permissões (Hardening).
 
-A vulnerabilidade explorada (Escalação de Privilégios via Misconfiguration) foi classificada como CRÍTICA. A combinação de um utilizador padrão pertencente ao grupo root (GID 0) com permissões de escrita excessivas no /etc/passwd criou um vetor de ataque trivial, porém devastador.
+A vulnerabilidade explorada (Escalação de Privilégios via Misconfiguration) foi classificada como CRÍTICA. A combinação de um utilizador padrão pertencente ao grupo root (GID 0) com permissões de escrita em ficheiros vitais do sistema (/etc/passwd) criou um vetor de ataque trivial, porém devastador.
 
-Este exercício reforça a máxima da cibersegurança: "Defesa em Profundidade" (Defense in Depth). Uma única camada de falha (permissão de arquivo) foi suficiente para quebrar o perímetro de segurança do contentor, tornando ineficazes as outras camadas de defesa (como SELinux) para impedir a tomada de controlo.
+Embora o ambiente apresentasse controlos compensatórios modernos — como a remoção de Linux Capabilities (CAP_CHOWN, CAP_DAC_READ_SEARCH) e um perfil SELinux restritivo que protegeu o ficheiro /etc/shadow — estas defesas mostraram-se insuficientes perante a capacidade de reescrever a identidade dos utilizadores no /etc/passwd.
 
-Nota: Após a validação da prova de conceito, todas as alterações (utilizador 'toor' e backdoor SUID) foram removidas para restaurar o estado original do laboratório.
+Ações Recomendadas Imediatas:
+
+    Remediação das permissões do sistema de ficheiros (mudança de 664 para 644 em ficheiros de configuração).
+
+    Adoção do princípio do menor privilégio (PoLP), removendo o GID 0 dos utilizadores de serviço.
+
+    Implementação de políticas de segurança de contentores (SecurityContext) para impor sistemas de ficheiros raiz como "Read-Only".
+
+Este exercício reforça a máxima da cibersegurança: "Defesa em Profundidade" (Defense in Depth). Uma única camada de falha (permissão de arquivo) foi suficiente para comprometer todo o perímetro de segurança do contentor.
+    Remover utilizadores não-administrativos do grupo root (GID 0).
+
+    Utilizar sistemas de ficheiros "Read-Only" para a raiz do container.
